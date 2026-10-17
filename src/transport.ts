@@ -1,6 +1,7 @@
 import type { Config, ConfiguredModel } from "./config.js";
 import type { PluginContext } from "./host-types.js";
-import type { Logger } from "./log.js";
+import { describeError, type Logger } from "./log.js";
+import { WorkerModelSelector } from "./models.js";
 import { estimateStringTokens } from "./tokens.js";
 
 /**
@@ -37,7 +38,13 @@ export type WorkerResponse = {
 export type WorkerInvoker = {
 	call(request: WorkerRequest): Promise<WorkerResponse>;
 	stats(): { inputTokens: number; outputTokens: number; calls: number };
+	/** Model this session's memory workers settled on, once one has answered. */
+	workerModel(sessionID: string | undefined): ConfiguredModel | undefined;
+	lastWorkerError(): { model: string; reason: string; kind: string } | undefined;
 };
+
+/** Bound on how many worker models are tried before a stage gives up. */
+const MAX_WORKER_ATTEMPTS = 5;
 
 export class WorkerAbortedError extends Error {
 	constructor() {
@@ -55,32 +62,14 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 	let inputTokens = 0;
 	let outputTokens = 0;
 	let calls = 0;
-	const sessionModels = new Map<string, ConfiguredModel | undefined>();
+	const selector = new WorkerModelSelector(ctx, config, logger);
 
-	/**
-	 * Worker model fallback: the session's own model. OpenCode's generate API
-	 * refuses some default/free models ("free tier can only be used from within
-	 * OpenCode"), while the same credentials work for the model the session is
-	 * actually running, so that is the sensible default.
-	 */
-	const sessionModel = async (sessionID: string | undefined): Promise<ConfiguredModel | undefined> => {
-		if (!sessionID) return undefined;
-		if (sessionModels.has(sessionID)) return sessionModels.get(sessionID);
-		let resolved: ConfiguredModel | undefined;
-		try {
-			const session = (await ctx.session.get({ sessionID })) as { model?: { providerID?: string; id?: string; variant?: string } };
-			const model = session?.model;
-			if (model?.providerID && model.id) {
-				resolved = { provider: model.providerID, id: model.id, ...(model.variant ? { variant: model.variant } : {}) };
-			}
-		} catch (error) {
-			logger.debug("session model lookup failed", describeError(error));
-		}
-		sessionModels.set(sessionID, resolved);
-		return resolved;
-	};
-
-	const runOnce = async (system: string, user: string, model: ConfiguredModel | undefined, signal: AbortSignal | undefined): Promise<string> => {
+	const runOnce = async (
+		system: string,
+		user: string,
+		model: ConfiguredModel | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<string> => {
 		if (signal?.aborted) throw new WorkerAbortedError();
 		const prompt = `${system}\n\n${user}`;
 		inputTokens += estimateStringTokens(prompt);
@@ -97,28 +86,33 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 		return response.text ?? "";
 	};
 
+	/**
+	 * Try each viable worker model in order. A gated model (Zen free tier,
+	 * not-launched model, unreadable id) is remembered for the process, a
+	 * transient failure gets a cooldown, and the first model that answers wins
+	 * for the rest of the session — so the search cost is paid once.
+	 */
 	const call = async (request: WorkerRequest): Promise<WorkerResponse> => {
-		const primary = config.model ?? (await sessionModel(request.sessionID));
-		const fallback = config.fallbackModel;
-		const attempts: { model: ConfiguredModel | undefined; fallbackUsed: boolean }[] = [{ model: primary, fallbackUsed: false }];
-		if (fallback && (!primary || fallback.provider !== primary.provider || fallback.id !== primary.id)) {
-			// Retry once with the fallback model on any failure of the primary
-			// (pi-observational-memory `runStageWithFallback`).
-			attempts.push({ model: fallback, fallbackUsed: true });
-		}
-
+		// Candidates are picked one at a time so a gate learned from the previous
+		// failure is respected immediately (free-tier refusal is provider-wide).
+		const attempted: ConfiguredModel[] = [];
+		const maxAttempts = MAX_WORKER_ATTEMPTS;
 		let lastError: unknown;
-		for (const attempt of attempts) {
+		for (let index = 0; index < maxAttempts; index++) {
+			const model = await selector.pick(request.sessionID, attempted);
+			if (!model && index > 0) break;
+			const label = model ? `${model.provider}/${model.id}` : "host default";
 			try {
-				const text = await runOnce(request.system, request.user, attempt.model, request.signal);
-				return { text, model: attempt.model, fallbackUsed: attempt.fallbackUsed };
+				const text = await runOnce(request.system, request.user, model, request.signal);
+				if (index > 0) logger.debug(`${request.label} worker recovered on fallback model`, { model: label });
+				selector.noteSuccess(model, request.sessionID);
+				return { text, model, fallbackUsed: index > 0 };
 			} catch (error) {
 				lastError = error;
 				if (error instanceof WorkerAbortedError || request.signal?.aborted) throw new WorkerAbortedError();
-				logger.warn(`${request.label} worker call failed${attempt.fallbackUsed ? " (fallback)" : ""}`, {
-					model: attempt.model ? `${attempt.model.provider}/${attempt.model.id}` : "session default",
-					error: describeError(error),
-				});
+				if (model) attempted.push(model);
+				const { kind } = selector.noteFailure(model, error);
+				logger.warn(`${request.label} worker call failed`, { model: label, kind, error: describeError(error) });
 			}
 		}
 		throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -127,10 +121,9 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 	return {
 		call,
 		stats: () => ({ inputTokens, outputTokens, calls }),
+		workerModel: (sessionID: string | undefined) => selector.chosen(sessionID ?? ""),
+		lastWorkerError: () => selector.lastError(),
 	};
 }
 
-export function describeError(error: unknown): string {
-	if (error instanceof Error) return `${error.name}: ${error.message}`;
-	return String(error);
-}
+export { describeError } from "./log.js";

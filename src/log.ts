@@ -59,3 +59,9 @@ function safeStringify(value: unknown): string {
 		return String(value);
 	}
 }
+
+/** Human-readable error text for logs and status output. */
+export function describeError(error: unknown): string {
+	if (error instanceof Error) return `${error.name}: ${error.message}`;
+	return String(error);
+}

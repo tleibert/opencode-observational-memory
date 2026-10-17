@@ -43,12 +43,20 @@ Published packages work the same way by name:
 }
 ```
 
-Or drop it in `.opencode/plugins/observational-memory/` to load it without config.
+Add the same block to `~/.config/opencode/opencode.jsonc` to enable it for every project (that is
+how this repo's author runs it), or drop it in `.opencode/plugins/observational-memory/` to load it
+without config.
 
 ### Worker model
 
-Memory workers call a model through OpenCode's generate API. By default the plugin uses **the
-session's own model**. Set `model` when you want memory work on a cheaper/faster model:
+Memory work (observing, reflecting, pruning) runs on a model of its own. By default the plugin
+walks a candidate list and settles on the first model that answers:
+
+1. `model` from the options — explicit choice always wins
+2. `fallbackModel` from the options
+3. the model the **session** is running
+4. any **free** model the host knows about
+5. the cheapest **paid** model — only when `allowPaidWorkerModel` is on
 
 ```jsonc
 {
@@ -64,8 +72,23 @@ session's own model**. Set `model` when you want memory work on a cheaper/faster
 }
 ```
 
-> Note: OpenCode's generate API refuses free-tier Zen models ("free tier can only be used from
-> within OpenCode"). If the session runs on a free model, configure a paid `model` for memory work.
+**Free-tier session models.** A session can run on a gated free model while plugin-issued
+generation is refused for it, because the host treats background calls differently:
+
+```
+Generate.UnavailableError: OpenCode's free tier can only be used from within OpenCode.
+```
+
+That is server-side policy and no header or client hint changes it (see the note below). The plugin
+handles it by learning the refusal, skipping the rest of that provider's free tier, and moving to a
+model that does work — usually another free model, so memory keeps running at zero cost. Refusals
+and transient failures are cached (permanent for gated models, 60s cooldown for timeouts), and the
+model that answered is remembered for the session, so the search is only paid once.
+
+`allowPaidWorkerModel` is **off** by default: if only paid models remain, memory stages log a clear
+failure and skip rather than spending money you did not ask for.
+
+> If every candidate fails, `/om:status` shows the resolved worker model and the last failure reason.
 
 ## What it does
 
@@ -106,7 +129,8 @@ Set via plugin `options` or `OM_*` environment variables (environment wins).
 | `workerMemoryMaxTokens` | `OM_WORKER_MEMORY_MAX_TOKENS` | 25% of window | Budget for the injected memory block. |
 | `agentMaxTokens` | `OM_AGENT_MAX_TOKENS` | `32000` | Worker output budget hint. |
 | `model` | `OM_MODEL` | session model | Worker model as `provider/model[#variant]`. |
-| `fallbackModel` | `OM_FALLBACK_MODEL` | – | Retried once when the primary worker model fails. |
+| `fallbackModel` | `OM_FALLBACK_MODEL` | – | Tried before the session model when the primary worker model fails. |
+| `allowPaidWorkerModel` | `OM_ALLOW_PAID_WORKER_MODEL` | `false` | Allow falling back to a paid worker model when no free model works. |
 | `consolidateWhenIdle` | `OM_CONSOLIDATE_WHEN_IDLE` | `true` | Background consolidation on settled turns. |
 | `observeBeforeRequest` | `OM_OBSERVE_BEFORE_REQUEST` | `false` | Observe synchronously before each agent request (deterministic; for headless/scripted runs). |
 | `injectMemory` | `OM_INJECT_MEMORY` | `true` | Inject memory into the system prompt. |

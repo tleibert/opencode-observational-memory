@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { classifyWorkerError, isFreeModel, orderModelCandidates, WorkerModelSelector } from "../src/models.js";
 import { parseObservations } from "../src/agents/observer.js";
 import { parseReflections, normalizeSupportingObservationIds } from "../src/agents/reflector.js";
 import { parseDropIds, selectDropCandidates } from "../src/agents/dropper.js";
@@ -240,5 +241,120 @@ describe("transcript", () => {
 		];
 		expect(tokensAfter(entries, 0)).toBe(20);
 		expect(tokensAfter(entries, -1)).toBe(30);
+	});
+});
+
+describe("worker model selection", () => {
+	it("classifies gated failures as permanent", () => {
+		const gated = classifyWorkerError(new Error("Generate.UnavailableError: OpenCode's free tier can only be used from within OpenCode."));
+		expect(gated.kind).toBe("gated");
+		expect(classifyWorkerError(new Error("Upstream request failed: [model_coming_soon] This model is coming soon")).kind).toBe("gated");
+		expect(classifyWorkerError(new Error("Generate.UnavailableError: Timed out waiting for response headers")).kind).toBe("transient");
+		expect(classifyWorkerError(new Error("boom")).kind).toBe("unknown");
+	});
+
+	it("treats only all-zero priced models as free", () => {
+		expect(isFreeModel([{ input: 0, output: 0 }])).toBe(true);
+		expect(isFreeModel([{ input: 0.3, output: 1.2 }])).toBe(false);
+		expect(isFreeModel([])).toBe(false);
+		expect(isFreeModel(undefined)).toBe(false);
+		// A tiered model with a free tier is still paid overall.
+		expect(isFreeModel([{ input: 0, output: 0 }, { input: 1, output: 2 }])).toBe(false);
+	});
+
+	it("orders candidates: session provider first, free before paid, gated ids excluded", () => {
+		const listing = [
+			{ providerID: "zen", id: "gated-free", cost: [{ input: 0, output: 0 }], limit: { context: 1_000_000 } },
+			{ providerID: "zen", id: "paid", cost: [{ input: 1, output: 2 }] },
+			{ providerID: "opencode-go", id: "free-same-provider", modelID: "free-same-provider", cost: [{ input: 0, output: 0 }] },
+			{ providerID: "opencode-go", id: "paid-same-provider", cost: [{ input: 0.3, output: 1.2 }] },
+			{ providerID: "other", id: "disabled-free", cost: [{ input: 0, output: 0 }], enabled: false },
+			{ providerID: "other", id: "deprecated-free", cost: [{ input: 0, output: 0 }], status: "deprecated" },
+		];
+		const free = orderModelCandidates(listing, { sessionProvider: "opencode-go", allowPaid: false });
+		expect(free.map((model) => `${model.provider}/${model.id}`)).toEqual([
+			"opencode-go/free-same-provider",
+			"zen/gated-free",
+		]);
+		const withPaid = orderModelCandidates(listing, {
+			sessionProvider: "opencode-go",
+			allowPaid: true,
+			exclude: ["zen/gated-free"],
+		});
+		expect(withPaid.map((model) => `${model.provider}/${model.id}`)).toEqual([
+			"opencode-go/free-same-provider",
+			"opencode-go/paid-same-provider",
+			"zen/paid",
+		]);
+	});
+});
+
+/** Silent logger: the selector only logs diagnostics. */
+function logger(): never {
+	const noop = () => undefined;
+	return { debug: noop, warn: noop, error: noop, recent: () => [], path: undefined } as never;
+}
+
+describe("worker model selector", () => {
+	const listing = {
+		data: [
+			{ providerID: "zen", id: "free-a", cost: [{ input: 0, output: 0 }] },
+			{ providerID: "zen", id: "free-b", cost: [{ input: 0, output: 0 }] },
+			{ providerID: "go", id: "free-c", cost: [{ input: 0, output: 0 }] },
+			{ providerID: "go", id: "paid-d", cost: [{ input: 0.3, output: 1.2 }] },
+		],
+	};
+
+	function ctx(sessionModel: { providerID: string; id: string } | undefined) {
+		return {
+			session: { get: async () => ({ model: sessionModel }) },
+			model: { list: async () => listing },
+		} as never;
+	}
+
+	it("walks from the session model to a working free model, skipping the gated provider", async () => {
+		const config = { ...resolveConfig({ env: {} }) };
+		const selector = new WorkerModelSelector(ctx({ providerID: "zen", id: "free-a" }), config as never, logger());
+		const first = await selector.pick("ses_1", []);
+		expect(first && `${first.provider}/${first.id}`).toBe("zen/free-a");
+
+		// The host refuses the whole zen free tier for plugin calls.
+		selector.noteFailure(first, new Error("Generate.UnavailableError: OpenCode's free tier can only be used from within OpenCode."));
+
+		const second = await selector.pick("ses_1", [first as never]);
+		expect(second && `${second.provider}/${second.id}`).toBe("go/free-c");
+
+		// A working model is remembered for the session.
+		selector.noteSuccess(second, "ses_1");
+		expect(selector.chosen("ses_1")).toEqual(second);
+		expect(selector.freeGatedProviders()).toEqual(["zen"]);
+	});
+
+	it("never proposes a paid model unless explicitly allowed", async () => {
+		const passive = new WorkerModelSelector(
+			ctx({ providerID: "zen", id: "free-a" }),
+			resolveConfig({ env: {} }) as never,
+			logger(),
+		);
+		const seen = await passive.candidates("ses_2");
+		expect(seen.some((model) => model.id === "paid-d")).toBe(false);
+
+		const paid = new WorkerModelSelector(
+			ctx({ providerID: "zen", id: "free-a" }),
+			resolveConfig({ options: { allowPaidWorkerModel: true }, env: {} }) as never,
+			logger(),
+		);
+		const withPaid = await paid.candidates("ses_2");
+		expect(withPaid.at(-1)?.id).toBe("paid-d");
+	});
+
+	it("always honours an explicit configured model first", async () => {
+		const selector = new WorkerModelSelector(
+			ctx({ providerID: "zen", id: "free-a" }),
+			resolveConfig({ options: { model: "go/paid-d" }, env: {} }) as never,
+			logger(),
+		);
+		const first = await selector.pick("ses_3", []);
+		expect(first && `${first.provider}/${first.id}`).toBe("go/paid-d");
 	});
 });

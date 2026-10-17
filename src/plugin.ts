@@ -95,12 +95,19 @@ export function createPlugin() {
 			// Inject rendered memory into every agent-loop request.
 			const contextRegistration = await ctx.session.hook("context", async (event) => {
 				try {
+					logger.debug("context hook", {
+						sessionID: event.sessionID,
+						system: event.system?.length ?? -1,
+						messages: event.messages?.length ?? -1,
+						observeBeforeRequest: config.observeBeforeRequest,
+					});
 					if (config.passive) return;
 					if (runtime.isWorkerCallInFlight()) return;
 					if (config.observeBeforeRequest) {
 						// Deterministic mode: cover the backlog before the request so the
 						// injected memory already includes this turn's predecessors.
 						await runtime.observe(event.sessionID, {
+							force: true,
 							maxChunks: config.compactionCatchUpMaxChunks,
 							allowCompactionRequest: false,
 							reason: "request",

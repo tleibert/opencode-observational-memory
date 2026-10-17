@@ -431,6 +431,15 @@ export class MemoryRuntime {
 		return state.observations.length > 0 || state.reflections.length > 0;
 	}
 
+	/** What the memory workers are actually talking to, and why they last failed. */
+	describeWorkerModel(sessionID: string): string {
+		const resolved = this.invoker.workerModel(sessionID);
+		const error = this.invoker.lastWorkerError();
+		const base = resolved ? `${resolved.provider}/${resolved.id}` : "not resolved yet";
+		if (!error) return base;
+		return `${base} (last failure on ${error.model}: ${error.reason})`;
+	}
+
 	renderStatus(state: MemoryState, extra: { sessionID: string; entries?: readonly SourceEntry[] }): string {
 		const metrics = observationPoolMetrics(state.observations, this.config.observationsPoolTargetTokens);
 		const stats = this.invoker.stats();
@@ -444,7 +453,7 @@ export class MemoryRuntime {
 			`- compactions folded into memory: ${state.compactions.length}`,
 			`- worker runs: observer ${state.stats.observerRuns}, reflector ${state.stats.reflectorRuns}, dropper ${state.stats.dropperRuns}, failures ${state.stats.failures}`,
 			`- worker tokens this process: in ${stats.inputTokens.toLocaleString()}, out ${stats.outputTokens.toLocaleString()} (${stats.calls} calls)`,
-			`- model: ${this.config.model ? `${this.config.model.provider}/${this.config.model.id}` : "OpenCode default"}${this.config.fallbackModel ? ` (fallback ${this.config.fallbackModel.provider}/${this.config.fallbackModel.id})` : ""}`,
+			`- worker model: ${this.describeWorkerModel(extra.sessionID)}`,
 			`- mode: ${this.config.passive ? "passive" : "active"}${this.config.injectMemory ? "" : ", injection off"}`,
 		];
 		if (extra.entries) {
@@ -573,3 +582,4 @@ function scoreText(haystack: string, needle: string): number {
 }
 
 export type { MemoryState, Observation };
+

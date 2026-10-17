@@ -49,6 +49,12 @@ export type Config = {
 	model?: ConfiguredModel;
 	/** Second memory worker used when the primary model fails or is unavailable. */
 	fallbackModel?: ConfiguredModel;
+	/**
+	 * Allow memory workers to fall back to a *paid* model when the session model
+	 * and every free model the host offers are unusable for plugin calls.
+	 * Off by default: background work should never spend money unasked.
+	 */
+	allowPaidWorkerModel: boolean;
 	/** Run consolidation (observe/reflect) when an assistant turn settles. */
 	consolidateWhenIdle: boolean;
 	/**
@@ -78,6 +84,7 @@ export const DEFAULTS: Config = {
 	observationsPoolTargetTokens: 10_000,
 	compactionCatchUpMaxChunks: 2,
 	agentMaxTokens: 32_000,
+	allowPaidWorkerModel: false,
 	consolidateWhenIdle: true,
 	observeBeforeRequest: false,
 	passive: false,
@@ -156,6 +163,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): Config {
 		agentMaxTokens: readNumber(pick("agentMaxTokens", "OM_AGENT_MAX_TOKENS"), DEFAULTS.agentMaxTokens),
 		model: parseModelRef(pick("model", "OM_MODEL")) ?? DEFAULTS.model,
 		fallbackModel: parseModelRef(pick("fallbackModel", "OM_FALLBACK_MODEL")) ?? DEFAULTS.fallbackModel,
+		allowPaidWorkerModel: readBoolean(pick("allowPaidWorkerModel", "OM_ALLOW_PAID_WORKER_MODEL"), DEFAULTS.allowPaidWorkerModel),
 		consolidateWhenIdle: readBoolean(pick("consolidateWhenIdle", "OM_CONSOLIDATE_WHEN_IDLE"), DEFAULTS.consolidateWhenIdle),
 		observeBeforeRequest: readBoolean(pick("observeBeforeRequest", "OM_OBSERVE_BEFORE_REQUEST"), DEFAULTS.observeBeforeRequest),
 		passive: readBoolean(pick("passive", "OM_PASSIVE"), DEFAULTS.passive),
