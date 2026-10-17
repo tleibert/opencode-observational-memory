@@ -1,6 +1,6 @@
 {
   "name": "opencode-observational-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Observational memory for OpenCode \u2014 cache-friendly tiered compaction with observations and reflections.",
   "type": "module",
   "license": "MIT",

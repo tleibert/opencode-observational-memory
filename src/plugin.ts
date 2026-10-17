@@ -29,19 +29,38 @@ const PLUGIN_ID = "observational-memory";
  * newest instance stays active: it claims a process-wide token, and the
  * previous instance's cleanup runs (also the hot-reload path).
  */
-const GLOBAL_KEY = Symbol.for("opencode-observational-memory.active");
+const GLOBAL_KEY_PREFIX = "opencode-observational-memory.active:";
 
-function claimInstance(token: symbol, cleanup: () => Promise<void> | void): void {
-	const holder = (globalThis as Record<symbol, unknown>)[GLOBAL_KEY] as
+/**
+ * OpenCode evaluates a plugin module more than once in one process (resolve then
+ * load, plus hot reload), and it keeps one plugin instance per location. The
+ * guard therefore has to be keyed by location as well:
+ *
+ *   - same location, evaluated twice: the newer instance is the live one, so the
+ *     older one is disposed (this is the hot-reload path)
+ *   - different locations: each keeps its own registration, so a session in one
+ *     directory still has om_recall, /om:status and its hooks while another
+ *     directory loads the plugin
+ *
+ * A single process-wide slot breaks the second case: every location's setup
+ * disposes the previous location's tools, commands and hooks, leaving only the
+ * location that happened to load last fully registered.
+ */
+function instanceKey(directory: string | undefined): symbol {
+	return Symbol.for(`${GLOBAL_KEY_PREFIX}${directory ?? "unknown"}`);
+}
+
+function claimInstance(key: symbol, token: symbol, cleanup: () => Promise<void> | void): void {
+	const holder = (globalThis as Record<symbol, unknown>)[key] as
 		| { token?: symbol; cleanup?: () => Promise<void> | void }
 		| undefined;
 	const previous = holder?.cleanup;
-	if (previous) void Promise.resolve(previous()).catch(() => undefined);
-	(globalThis as Record<symbol, unknown>)[GLOBAL_KEY] = { token, cleanup };
+	if (previous && holder?.token !== token) void Promise.resolve(previous()).catch(() => undefined);
+	(globalThis as Record<symbol, unknown>)[key] = { token, cleanup };
 }
 
-function isCurrentInstance(token: symbol): boolean {
-	const holder = (globalThis as Record<symbol, unknown>)[GLOBAL_KEY] as { token?: symbol } | undefined;
+function isCurrentInstance(key: symbol, token: symbol): boolean {
+	const holder = (globalThis as Record<symbol, unknown>)[key] as { token?: symbol } | undefined;
 	return holder?.token === token;
 }
 
@@ -182,7 +201,7 @@ async function reportCommand(
 			void (async () => {
 				try {
 					for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
-						if (!isCurrentInstance(instanceToken)) break;
+						if (!isCurrentInstance(instanceKey(ctx.location?.directory), instanceToken)) break;
 						const type = eventType(event);
 						if (!type) continue;
 						if (config.debugLog && observedEventTypes.size < 40 && !observedEventTypes.has(type)) {
@@ -286,7 +305,7 @@ async function reportCommand(
 					}
 				}
 			};
-			claimInstance(instanceToken, instanceCleanup);
+			claimInstance(instanceKey(ctx.location?.directory), instanceToken, instanceCleanup);
 
 			return instanceCleanup;
 		},

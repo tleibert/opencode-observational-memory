@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- **Only one location had the plugin's tools.** The double-evaluation guard used a single
+  process-wide slot, which is correct for "the module was evaluated twice for this directory" but
+  wrong for a server that serves many directories: each location's `setup` disposed the previous
+  location's tools, commands and hooks, so just the last-loaded directory kept `om_recall`,
+  `/om:status`, `/om:view`, `/om:reset` and its hooks. The guard is now keyed by location. Verified
+  by loading two directories in one server and reading the model-visible tool list in both: each now
+  reports `om_recall` plus the three commands (13 tools).
+
 ## 0.2.0
 
 Everything here came out of running the plugin against a live OpenCode session rather than
