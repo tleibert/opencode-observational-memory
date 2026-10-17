@@ -97,6 +97,7 @@ async function reportCommand(
 			const runtime = new MemoryRuntime(ctx, config, logger, invoker);
 
 			logger.debug("plugin loaded", {
+				version: PLUGIN_VERSION,
 				directory: ctx.location?.directory,
 				passive: config.passive,
 				injectMemory: config.injectMemory,
