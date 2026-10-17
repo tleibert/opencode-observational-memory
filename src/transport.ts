@@ -1,0 +1,136 @@
+import type { Config, ConfiguredModel } from "./config.js";
+import type { PluginContext } from "./host-types.js";
+import type { Logger } from "./log.js";
+import { estimateStringTokens } from "./tokens.js";
+
+/**
+ * Memory worker transport.
+ *
+ * Pi's version streams through pi-ai with an agent loop plus a
+ * `record_observations`-style tool. OpenCode's plugin API exposes a transient
+ * one-shot generation (`ctx.generate.text`) with an optional model, so this
+ * port drives the same workers with a strict JSON output contract instead of a
+ * tool loop: the prompt states the exact JSON shape, and every proposed record
+ * is validated, deduplicated and filtered locally before it is trusted.
+ *
+ * `agentMaxTokens` has no equivalent on the generate API (it is not a
+ * parameter); it is kept in the config for parity and used on the observation
+ * side to bound chunk sizes so worker output stays small.
+ */
+
+export type WorkerRequest = {
+	system: string;
+	user: string;
+	/** Short label used in logs and error messages (e.g. "observer"). */
+	label: string;
+	/** Session whose model is used when no worker model is configured. */
+	sessionID?: string;
+	signal?: AbortSignal;
+};
+
+export type WorkerResponse = {
+	text: string;
+	model?: ConfiguredModel;
+	fallbackUsed: boolean;
+};
+
+export type WorkerInvoker = {
+	call(request: WorkerRequest): Promise<WorkerResponse>;
+	stats(): { inputTokens: number; outputTokens: number; calls: number };
+};
+
+export class WorkerAbortedError extends Error {
+	constructor() {
+		super("memory worker aborted");
+		this.name = "WorkerAbortedError";
+	}
+}
+
+function toModelRef(model: ConfiguredModel | undefined) {
+	if (!model) return undefined;
+	return { providerID: model.provider, id: model.id, ...(model.variant ? { variant: model.variant } : {}) };
+}
+
+export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: Logger): WorkerInvoker {
+	let inputTokens = 0;
+	let outputTokens = 0;
+	let calls = 0;
+	const sessionModels = new Map<string, ConfiguredModel | undefined>();
+
+	/**
+	 * Worker model fallback: the session's own model. OpenCode's generate API
+	 * refuses some default/free models ("free tier can only be used from within
+	 * OpenCode"), while the same credentials work for the model the session is
+	 * actually running, so that is the sensible default.
+	 */
+	const sessionModel = async (sessionID: string | undefined): Promise<ConfiguredModel | undefined> => {
+		if (!sessionID) return undefined;
+		if (sessionModels.has(sessionID)) return sessionModels.get(sessionID);
+		let resolved: ConfiguredModel | undefined;
+		try {
+			const session = (await ctx.session.get({ sessionID })) as { model?: { providerID?: string; id?: string; variant?: string } };
+			const model = session?.model;
+			if (model?.providerID && model.id) {
+				resolved = { provider: model.providerID, id: model.id, ...(model.variant ? { variant: model.variant } : {}) };
+			}
+		} catch (error) {
+			logger.debug("session model lookup failed", describeError(error));
+		}
+		sessionModels.set(sessionID, resolved);
+		return resolved;
+	};
+
+	const runOnce = async (system: string, user: string, model: ConfiguredModel | undefined, signal: AbortSignal | undefined): Promise<string> => {
+		if (signal?.aborted) throw new WorkerAbortedError();
+		const prompt = `${system}\n\n${user}`;
+		inputTokens += estimateStringTokens(prompt);
+		const modelRef = toModelRef(model);
+		const response = await ctx.generate.text(
+			modelRef ? { prompt, model: modelRef as never } : { prompt },
+			signal ? { signal } : undefined,
+		);
+		outputTokens += estimateStringTokens(response.text ?? "");
+		calls++;
+		if (calls <= 5 || response.text.length < 40) {
+			logger.debug("worker response", { bytes: response.text.length, head: response.text.slice(0, 160).replace(/\s+/g, " ") });
+		}
+		return response.text ?? "";
+	};
+
+	const call = async (request: WorkerRequest): Promise<WorkerResponse> => {
+		const primary = config.model ?? (await sessionModel(request.sessionID));
+		const fallback = config.fallbackModel;
+		const attempts: { model: ConfiguredModel | undefined; fallbackUsed: boolean }[] = [{ model: primary, fallbackUsed: false }];
+		if (fallback && (!primary || fallback.provider !== primary.provider || fallback.id !== primary.id)) {
+			// Retry once with the fallback model on any failure of the primary
+			// (pi-observational-memory `runStageWithFallback`).
+			attempts.push({ model: fallback, fallbackUsed: true });
+		}
+
+		let lastError: unknown;
+		for (const attempt of attempts) {
+			try {
+				const text = await runOnce(request.system, request.user, attempt.model, request.signal);
+				return { text, model: attempt.model, fallbackUsed: attempt.fallbackUsed };
+			} catch (error) {
+				lastError = error;
+				if (error instanceof WorkerAbortedError || request.signal?.aborted) throw new WorkerAbortedError();
+				logger.warn(`${request.label} worker call failed${attempt.fallbackUsed ? " (fallback)" : ""}`, {
+					model: attempt.model ? `${attempt.model.provider}/${attempt.model.id}` : "session default",
+					error: describeError(error),
+				});
+			}
+		}
+		throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	};
+
+	return {
+		call,
+		stats: () => ({ inputTokens, outputTokens, calls }),
+	};
+}
+
+export function describeError(error: unknown): string {
+	if (error instanceof Error) return `${error.name}: ${error.message}`;
+	return String(error);
+}
