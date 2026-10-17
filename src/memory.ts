@@ -66,6 +66,7 @@ const STORAGE_PREFIX = "memory/";
 export class MemoryRuntime {
 	private readonly states = new Map<string, MemoryState>();
 	private readonly controllers = new Map<string, AbortController>();
+	private readonly notices = new Map<string, string[]>();
 	private workerCalls = 0;
 
 	constructor(
@@ -265,6 +266,7 @@ export class MemoryRuntime {
 				duplicates += result.duplicates;
 				if (result.observations.length > 0) {
 					state.observations.push(...result.observations);
+					this.pushNotice(sessionID, `+${result.observations.length} observations`);
 				}
 				// Advance coverage even for an empty chunk: the worker read it.
 				if (slice.lastId) state.observedThrough = slice.lastId;
@@ -334,7 +336,10 @@ export class MemoryRuntime {
 					}),
 				sessionID,
 			);
-			if (result.reflections.length > 0) state.reflections.push(...result.reflections);
+			if (result.reflections.length > 0) {
+				state.reflections.push(...result.reflections);
+				this.pushNotice(sessionID, `+${result.reflections.length} reflections`);
+			}
 			state.reflectedThrough = state.observedThrough;
 			state.stats.reflectorRuns++;
 			this.noteSuccess(sessionID);
@@ -377,6 +382,7 @@ export class MemoryRuntime {
 				const dropped = new Set(result.ids);
 				state.observations = state.observations.filter((observation) => !dropped.has(observation.id));
 				state.droppedObservationIds.push(...dropped);
+				this.pushNotice(sessionID, `-${result.ids.length} observations`);
 			}
 			state.droppedThrough = state.observedThrough;
 			state.stats.dropperRuns++;
@@ -429,6 +435,31 @@ export class MemoryRuntime {
 
 	hasMemory(state: MemoryState): boolean {
 		return state.observations.length > 0 || state.reflections.length > 0;
+	}
+
+	/** Stop every in-flight memory worker (used when this instance is replaced). */
+	abortAll(): void {
+		for (const [sessionID, controller] of this.controllers) {
+			controller.abort();
+			this.controllers.delete(sessionID);
+			this.logger.debug("aborted in-flight memory work", { sessionID });
+		}
+	}
+
+	/** Queue a short line about what the workers just did (shown in the session). */
+	pushNotice(sessionID: string, part: string): void {
+		if (!this.config.notifyMemoryUpdates || !part) return;
+		const list = this.notices.get(sessionID) ?? [];
+		if (!list.includes(part)) list.push(part);
+		this.notices.set(sessionID, list);
+	}
+
+	/** Take (and clear) the lines queued for a session, as one summary. */
+	drainNotices(sessionID: string): string {
+		const list = this.notices.get(sessionID);
+		if (!list || list.length === 0) return "";
+		this.notices.delete(sessionID);
+		return `${MEMORY_NOTICE_PREFIX}${list.join(", ")}`;
 	}
 
 	/** True when an id belongs to a worker child session created by this plugin. */
@@ -590,6 +621,9 @@ function scoreText(haystack: string, needle: string): number {
 	for (const term of terms) if (haystack.includes(term)) hits++;
 	return hits === terms.length ? 1 + terms.length / 10 : 0;
 }
+
+/** Prefix that marks a plugin notice, so memory never observes its own notices. */
+export const MEMORY_NOTICE_PREFIX = "🧠 memory: ";
 
 export type { MemoryState, Observation };
 

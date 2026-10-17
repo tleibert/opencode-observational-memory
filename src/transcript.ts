@@ -1,3 +1,4 @@
+import { MEMORY_NOTICE_PREFIX } from "./memory.js";
 import { estimateStringTokens } from "./tokens.js";
 
 /**
@@ -133,6 +134,9 @@ export function entriesFromSessionMessages(messages: readonly unknown[]): { entr
 		if (type === "system" || type === "synthetic") {
 			if (!id) continue;
 			const text = typeof message.text === "string" ? message.text : "";
+			// Our own "memory: ..." notices are bookkeeping, not conversation; letting
+			// them through would make memory observe its own activity.
+			if (text.startsWith(MEMORY_NOTICE_PREFIX)) continue;
 			entries.push({ id, role: "system", text, timestampMs, tokens: estimateStringTokens(text), kind: "system" });
 			continue;
 		}

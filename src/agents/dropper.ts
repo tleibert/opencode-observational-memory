@@ -75,7 +75,16 @@ export function parseDropIds(raw: unknown, activeIds: readonly string[], maxDrop
 export async function runDropper(invoker: WorkerInvoker, input: DropperInput): Promise<DropperResult> {
 	if (input.maxDrops <= 0) return { ids: [], requested: 0 };
 	const { system, user } = buildDropperPrompt(input);
-	const response = await invoker.call({ system, user, label: input.label ?? "dropper", signal: input.signal, sessionID: input.sessionID });
+	const response = await invoker.call({
+		system,
+		user,
+		label: input.label ?? "dropper",
+		signal: input.signal,
+		sessionID: input.sessionID,
+		validate: (text) => {
+			extractJsonObject(text);
+		},
+	});
 	const parsed = extractJsonObject(response.text);
 	return parseDropIds(parsed, input.allowedObservationIds, input.maxDrops);
 }

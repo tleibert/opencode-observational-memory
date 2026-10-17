@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode/plugin";
 import { resolveConfig } from "./config.js";
 import { handleCompaction } from "./hooks/compaction.js";
-import { createLogger } from "./log.js";
+import { createLogger, type Logger } from "./log.js";
 import { MemoryRuntime } from "./memory.js";
 import { createWorkerInvoker, describeError } from "./transport.js";
 import type { PluginContext } from "./host-types.js";
@@ -65,6 +65,26 @@ function eventType(event: unknown): string | undefined {
 }
 
 export function createPlugin() {
+/** Run a command body and always show something: silence looks like a broken command. */
+async function reportCommand(
+	ctx: PluginContext,
+	logger: Logger,
+	sessionID: string,
+	body: () => Promise<string>,
+): Promise<void> {
+	try {
+		const text = await body();
+		await ctx.session.synthetic({ sessionID, text } as never);
+	} catch (error) {
+		logger.warn("command failed", { sessionID, error: describeError(error) });
+		try {
+			await ctx.session.synthetic({ sessionID, text: `observational memory: command failed - ${describeError(error)}` } as never);
+		} catch {
+			// nothing else we can do
+		}
+	}
+}
+
 	return Plugin.define({
 		id: PLUGIN_ID,
 		async setup(ctx: PluginContext) {
@@ -112,6 +132,7 @@ export function createPlugin() {
 							allowCompactionRequest: false,
 							reason: "request",
 						});
+						await postNotices(event.sessionID);
 					}
 					if (!config.injectMemory) return;
 					const state = await runtime.load(event.sessionID);
@@ -141,6 +162,18 @@ export function createPlugin() {
 				logger.debug("compaction hook outcome", { sessionID: event.sessionID, outcome });
 			});
 
+			// Surface what the workers did, so the ledger is visible in the session.
+			const postNotices = async (sessionID: string) => {
+				try {
+					const text = runtime.drainNotices(sessionID);
+					if (!text) return;
+					await ctx.session.synthetic({ sessionID, text } as never);
+					logger.debug("memory notice posted", { sessionID, text });
+				} catch (error) {
+					logger.debug("memory notice failed", describeError(error));
+				}
+			};
+
 			// Background consolidation when the session goes idle.
 			const eventController = new AbortController();
 			const running = new Set<string>();
@@ -165,6 +198,7 @@ export function createPlugin() {
 						running.add(sessionID);
 						void runtime
 							.consolidate(sessionID, { allowCompactionRequest: true, reason: "idle" })
+							.then(() => postNotices(sessionID))
 							.catch((error) => logger.warn("idle consolidation failed", describeError(error)))
 							.finally(() => running.delete(sessionID));
 					}
@@ -177,6 +211,10 @@ export function createPlugin() {
 			const toolRegistration = await ctx.tool.transform((editor) => {
 				editor.add({
 					name: "om_recall",
+					// Without this the host keeps the tool inside the code-mode sandbox
+					// (callable only as tools.om_recall(...) from `execute`), so it never
+					// reaches the model's own tool list.
+					options: { codemode: false },
 					description:
 						"Search this session's observational memory. Use it when a memory id needs exact source context, or to check whether something was already decided, completed, or rejected before redoing work.",
 					input: {
@@ -203,33 +241,40 @@ export function createPlugin() {
 					name: "om:status",
 					description: "Show observational memory status for this session",
 					execute: async ({ sessionID }) => {
-						const state = await runtime.load(sessionID);
-						const { entries } = await runtime.readTranscript(sessionID);
-						await ctx.session.synthetic({ sessionID, text: runtime.renderStatus(state, { sessionID, entries }) });
+						await reportCommand(ctx, logger, sessionID, async () => {
+							const state = await runtime.load(sessionID);
+							const { entries } = await runtime.readTranscript(sessionID);
+							return runtime.renderStatus(state, { sessionID, entries });
+						});
 					},
 				});
 				editor.add({
 					name: "om:view",
 					description: "Show active observations and reflections for this session",
 					execute: async ({ sessionID }) => {
-						const state = await runtime.load(sessionID);
-						await ctx.session.synthetic({ sessionID, text: runtime.renderView(state, { full: true }) });
+						await reportCommand(ctx, logger, sessionID, async () => {
+							const state = await runtime.load(sessionID);
+							return runtime.renderView(state, { full: true });
+						});
 					},
 				});
 				editor.add({
 					name: "om:reset",
 					description: "Delete observational memory for this session",
 					execute: async ({ sessionID }) => {
-						await runtime.abort(sessionID);
-						await runtime.releaseWorkerSessions(sessionID);
-						await runtime.reset(sessionID);
-						await ctx.session.synthetic({ sessionID, text: "Observational memory cleared for this session." });
+						await reportCommand(ctx, logger, sessionID, async () => {
+							await runtime.abort(sessionID);
+							await runtime.releaseWorkerSessions(sessionID);
+							await runtime.reset(sessionID);
+							return "Observational memory cleared for this session.";
+						});
 					},
 				});
 			});
 
 			const instanceCleanup = async () => {
 				eventController.abort();
+				runtime.abortAll();
 				await invoker.dispose();
 				for (const registration of [promptRegistration, contextRegistration, compactionRegistration, toolRegistration, commandRegistration]) {
 					try {

@@ -1,3 +1,4 @@
+import { MEMORY_NOTICE_PREFIX } from "../src/memory.js";
 import { describe, expect, it } from "vitest";
 import { classifyWorkerError, isFreeModel, orderModelCandidates, WorkerModelSelector } from "../src/models.js";
 import { parseObservations } from "../src/agents/observer.js";
@@ -356,5 +357,23 @@ describe("worker model selector", () => {
 		);
 		const first = await selector.pick("ses_3", []);
 		expect(first && `${first.provider}/${first.id}`).toBe("go/paid-d");
+	});
+});
+
+
+describe("memory notices", () => {
+	it("marks notices with a prefix so memory never observes its own activity", () => {
+		expect(MEMORY_NOTICE_PREFIX).toBe("🧠 memory: ");
+	});
+
+	it("drops notice messages from the transcript while keeping real system messages", async () => {
+		const { entriesFromSessionMessages } = await import("../src/transcript.js");
+		const messages = [
+			{ id: "msg_notice", type: "synthetic", time: { created: 1_700_000_000_000 }, text: `${MEMORY_NOTICE_PREFIX}+3 observations` },
+			{ id: "msg_sys", type: "synthetic", time: { created: 1_700_000_001_000 }, text: "Keep going, 3 steps remain." },
+			{ id: "msg_user", type: "user", time: { created: 1_700_000_002_000 }, text: "hello" },
+		];
+		const { entries } = entriesFromSessionMessages(messages as never);
+		expect(entries.map((entry) => entry.id)).toEqual(["msg_sys", "msg_user"]);
 	});
 });

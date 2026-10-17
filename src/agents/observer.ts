@@ -138,7 +138,16 @@ export function parseObservations(
 export async function runObserver(invoker: WorkerInvoker, input: ObserverInput): Promise<ObserverResult> {
 	if (!input.chunk.trim()) return { observations: [], rejected: 0, duplicates: 0 };
 	const { system, user } = buildObserverPrompt(input);
-	const response = await invoker.call({ system, user, label: input.label ?? "observer", signal: input.signal, sessionID: input.sessionID });
+	const response = await invoker.call({
+		system,
+		user,
+		label: input.label ?? "observer",
+		signal: input.signal,
+		sessionID: input.sessionID,
+		validate: (text) => {
+			extractJsonObject(text);
+		},
+	});
 	const parsed = extractJsonObject(response.text);
 	const result = parseObservations(parsed, input.allowedSourceEntryIds, input.knownIds);
 	if (result.observations.length === 0 && result.rejected > 0 && result.duplicates === 0) {

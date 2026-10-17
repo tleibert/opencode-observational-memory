@@ -117,7 +117,16 @@ export function parseReflections(
 export async function runReflector(invoker: WorkerInvoker, input: ReflectorInput): Promise<ReflectorResult> {
 	if (input.observations.length === 0) return { reflections: [], rejected: 0, duplicates: 0 };
 	const { system, user } = buildReflectorPrompt(input);
-	const response = await invoker.call({ system, user, label: input.label ?? "reflector", signal: input.signal, sessionID: input.sessionID });
+	const response = await invoker.call({
+		system,
+		user,
+		label: input.label ?? "reflector",
+		signal: input.signal,
+		sessionID: input.sessionID,
+		validate: (text) => {
+			extractJsonObject(text);
+		},
+	});
 	const parsed = extractJsonObject(response.text);
 	const result = parseReflections(parsed, input.allowedObservationIds, input.knownIds);
 	if (result.reflections.length === 0 && result.rejected > 0 && result.duplicates === 0) {

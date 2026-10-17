@@ -2,6 +2,7 @@ import type { Config, ConfiguredModel } from "./config.js";
 import type { PluginContext } from "./host-types.js";
 import { describeError, type Logger } from "./log.js";
 import { WorkerModelSelector } from "./models.js";
+import { extractJsonObject } from "./agents/json.js";
 import { WorkerSessions } from "./worker-session.js";
 import { estimateStringTokens } from "./tokens.js";
 
@@ -28,6 +29,13 @@ export type WorkerRequest = {
 	/** Session whose model is used when no worker model is configured. */
 	sessionID?: string;
 	signal?: AbortSignal;
+	/**
+	 * Cheap check on the raw answer (does it even contain the JSON object we
+	 * asked for?). A worker that replies with prose is a bad worker, so the
+	 * attempt fails and the next candidate model is tried rather than burning
+	 * the whole stage.
+	 */
+	validate?: (text: string) => void;
 };
 
 export type WorkerResponse = {
@@ -81,7 +89,19 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 	const sessions = new WorkerSessions(ctx, logger);
 	const chains = new Map<string, Promise<unknown>>();
 
-	const count = (text: string, prompt: string) => {
+	const textOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** True when the text contains the JSON object the worker contract demands. */
+const isJsonResponse = (text: string): boolean => {
+	try {
+		extractJsonObject(text);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+const count = (text: string, prompt: string) => {
 		inputTokens += estimateStringTokens(prompt);
 		outputTokens += estimateStringTokens(text);
 	};
@@ -144,6 +164,7 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 				let text = config.workerTransport === "generate" ? undefined : await viaSession(request.sessionID, model, prompt, request.signal);
 				if (text === undefined) text = await viaGenerate(model, prompt, request.signal);
 				if (!text.trim()) throw new EmptyWorkerResponseError(label);
+				request.validate?.(text);
 				if (index > 0) logger.debug(`${request.label} worker recovered`, { model: label });
 				selector.noteSuccess(model, request.sessionID);
 				return { text, model, fallbackUsed: index > 0 };
@@ -151,8 +172,12 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 				lastError = error;
 				if (error instanceof WorkerAbortedError || request.signal?.aborted) throw new WorkerAbortedError();
 				if (model) attempted.push(model);
+				const kindLabel =
+					error instanceof EmptyWorkerResponseError || !isJsonResponse(textOf(error))
+						? "unusable output"
+						: describeError(error);
 				const { kind } = selector.noteFailure(model, error);
-				logger.warn(`${request.label} worker call failed`, { model: label, kind, error: describeError(error) });
+				logger.warn(`${request.label} worker call failed`, { model: label, kind, error: kindLabel });
 			}
 		}
 		throw lastError instanceof Error ? lastError : new Error(String(lastError));

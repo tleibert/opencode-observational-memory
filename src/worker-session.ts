@@ -28,6 +28,14 @@ import { modelKey } from "./models.js";
  * create cost is paid once per model rather than once per stage.
  */
 
+/** Thrown when a superseded plugin instance is asked to run more worker work. */
+export class WorkerSessionsDisposedError extends Error {
+	constructor() {
+		super("worker sessions disposed (plugin instance was replaced)");
+		this.name = "WorkerSessionsDisposedError";
+	}
+}
+
 export class WorkerSessions {
 	private children = new Map<string, string>();
 	private owned = new Set<string>();
@@ -49,7 +57,10 @@ export class WorkerSessions {
 	 * the caller falls back to plugin-issued generation.
 	 */
 	async ensure(parentSessionID: string | undefined, model: ConfiguredModel | undefined): Promise<string | undefined> {
-		if (this.disposed) return undefined;
+		// Never quietly downgrade to plugin-issued generation after teardown: that
+		// path is refused for gated models, so the worker would report a bogus
+		// "free tier" failure instead of "this plugin instance was replaced".
+		if (this.disposed) throw new WorkerSessionsDisposedError();
 		if (!parentSessionID || !model) return undefined;
 		const key = `${parentSessionID}\u0000${modelKey(model)}`;
 		const existing = this.children.get(key);

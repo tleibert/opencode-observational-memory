@@ -65,6 +65,12 @@ export type Config = {
 	 *   the host refuses it in sessions too).
 	 */
 	workerTransport: "auto" | "session" | "generate";
+	/**
+	 * Post a one-line summary into the session when memory changed (observations
+	 * added, reflections distilled, observations pruned). Expected by anyone who
+	 * wants to see that the workers are alive; turn it off for a silent ledger.
+	 */
+	notifyMemoryUpdates: boolean;
 	/** Run consolidation (observe/reflect) when an assistant turn settles. */
 	consolidateWhenIdle: boolean;
 	/**
@@ -96,6 +102,7 @@ export const DEFAULTS: Config = {
 	agentMaxTokens: 32_000,
 	allowPaidWorkerModel: false,
 	workerTransport: "auto",
+	notifyMemoryUpdates: true,
 	consolidateWhenIdle: true,
 	observeBeforeRequest: false,
 	passive: false,
@@ -180,6 +187,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): Config {
 		fallbackModel: parseModelRef(pick("fallbackModel", "OM_FALLBACK_MODEL")) ?? DEFAULTS.fallbackModel,
 		allowPaidWorkerModel: readBoolean(pick("allowPaidWorkerModel", "OM_ALLOW_PAID_WORKER_MODEL"), DEFAULTS.allowPaidWorkerModel),
 		workerTransport: readChoice(pick("workerTransport", "OM_WORKER_TRANSPORT"), ["auto", "session", "generate"], DEFAULTS.workerTransport),
+		notifyMemoryUpdates: readBoolean(pick("notifyMemoryUpdates", "OM_NOTIFY_MEMORY_UPDATES"), DEFAULTS.notifyMemoryUpdates),
 		consolidateWhenIdle: readBoolean(pick("consolidateWhenIdle", "OM_CONSOLIDATE_WHEN_IDLE"), DEFAULTS.consolidateWhenIdle),
 		observeBeforeRequest: readBoolean(pick("observeBeforeRequest", "OM_OBSERVE_BEFORE_REQUEST"), DEFAULTS.observeBeforeRequest),
 		passive: readBoolean(pick("passive", "OM_PASSIVE"), DEFAULTS.passive),
