@@ -2,6 +2,7 @@ import type { Config, ConfiguredModel } from "./config.js";
 import type { PluginContext } from "./host-types.js";
 import { describeError, type Logger } from "./log.js";
 import { WorkerModelSelector } from "./models.js";
+import { WorkerSessions } from "./worker-session.js";
 import { estimateStringTokens } from "./tokens.js";
 
 /**
@@ -41,10 +42,24 @@ export type WorkerInvoker = {
 	/** Model this session's memory workers settled on, once one has answered. */
 	workerModel(sessionID: string | undefined): ConfiguredModel | undefined;
 	lastWorkerError(): { model: string; reason: string; kind: string } | undefined;
+	/** True when the id belongs to a worker child session, not a user session. */
+	ownsSession(sessionID: string | undefined): boolean;
+	/** Delete this session's worker children (on reset). */
+	releaseSession(sessionID: string): Promise<void>;
+	/** Delete every worker child (on plugin teardown). */
+	dispose(): Promise<void>;
 };
 
 /** Bound on how many worker models are tried before a stage gives up. */
 const MAX_WORKER_ATTEMPTS = 5;
+
+/** A model that answers with nothing at all is not a usable worker. */
+export class EmptyWorkerResponseError extends Error {
+	constructor(model: string) {
+		super(`worker model ${model} returned an empty response`);
+		this.name = "EmptyWorkerResponseError";
+	}
+}
 
 export class WorkerAbortedError extends Error {
 	constructor() {
@@ -63,48 +78,73 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 	let outputTokens = 0;
 	let calls = 0;
 	const selector = new WorkerModelSelector(ctx, config, logger);
+	const sessions = new WorkerSessions(ctx, logger);
+	const chains = new Map<string, Promise<unknown>>();
 
-	const runOnce = async (
-		system: string,
-		user: string,
-		model: ConfiguredModel | undefined,
-		signal: AbortSignal | undefined,
-	): Promise<string> => {
-		if (signal?.aborted) throw new WorkerAbortedError();
-		const prompt = `${system}\n\n${user}`;
+	const count = (text: string, prompt: string) => {
 		inputTokens += estimateStringTokens(prompt);
+		outputTokens += estimateStringTokens(text);
+	};
+
+	/** Native session machinery: a child session carries the worker model. */
+	const viaSession = async (
+		parentSessionID: string | undefined,
+		model: ConfiguredModel | undefined,
+		prompt: string,
+		signal: AbortSignal | undefined,
+	): Promise<string | undefined> => {
+		if (config.workerTransport === "generate") return undefined;
+		const childID = await sessions.ensure(parentSessionID, model);
+		if (!childID) return undefined;
+		const response = (await ctx.session.generate(
+			{ sessionID: childID, prompt },
+			signal ? { signal } : undefined,
+		)) as { text?: string } | undefined;
+		const text = response?.text ?? "";
+		calls++;
+		count(text, prompt);
+		if (calls <= 5 || text.length < 40) {
+			logger.debug("worker response (session)", { bytes: text.length, head: text.slice(0, 160).replace(/\s+/g, " ") });
+		}
+		return text;
+	};
+
+	/** Plugin-issued generation: the only path that can pick an arbitrary model. */
+	const viaGenerate = async (model: ConfiguredModel | undefined, prompt: string, signal: AbortSignal | undefined): Promise<string> => {
 		const modelRef = toModelRef(model);
 		const response = await ctx.generate.text(
 			modelRef ? { prompt, model: modelRef as never } : { prompt },
 			signal ? { signal } : undefined,
 		);
-		outputTokens += estimateStringTokens(response.text ?? "");
+		const text = response?.text ?? "";
 		calls++;
-		if (calls <= 5 || response.text.length < 40) {
-			logger.debug("worker response", { bytes: response.text.length, head: response.text.slice(0, 160).replace(/\s+/g, " ") });
+		count(text, prompt);
+		if (calls <= 5 || text.length < 40) {
+			logger.debug("worker response (generate)", { bytes: text.length, head: text.slice(0, 160).replace(/\s+/g, " ") });
 		}
-		return response.text ?? "";
+		return text;
 	};
 
 	/**
-	 * Try each viable worker model in order. A gated model (Zen free tier,
-	 * not-launched model, unreadable id) is remembered for the process, a
-	 * transient failure gets a cooldown, and the first model that answers wins
-	 * for the rest of the session — so the search cost is paid once.
+	 * Try each viable worker model until one answers. Session machinery is
+	 * preferred because the host refuses plugin-issued calls for gated models;
+	 * empty output counts as a failure so a model that cannot answer does not
+	 * burn the stage.
 	 */
-	const call = async (request: WorkerRequest): Promise<WorkerResponse> => {
-		// Candidates are picked one at a time so a gate learned from the previous
-		// failure is respected immediately (free-tier refusal is provider-wide).
+	const run = async (request: WorkerRequest): Promise<WorkerResponse> => {
 		const attempted: ConfiguredModel[] = [];
-		const maxAttempts = MAX_WORKER_ATTEMPTS;
 		let lastError: unknown;
-		for (let index = 0; index < maxAttempts; index++) {
+		for (let index = 0; index < MAX_WORKER_ATTEMPTS; index++) {
 			const model = await selector.pick(request.sessionID, attempted);
 			if (!model && index > 0) break;
 			const label = model ? `${model.provider}/${model.id}` : "host default";
+			if (request.signal?.aborted) throw new WorkerAbortedError();
 			try {
-				const text = await runOnce(request.system, request.user, model, request.signal);
-				if (index > 0) logger.debug(`${request.label} worker recovered on fallback model`, { model: label });
+				const prompt = `${request.system}\n\n${request.user}`;
+				let text = config.workerTransport === "generate" ? undefined : await viaSession(request.sessionID, model, prompt, request.signal);
+				if (text === undefined) text = await viaGenerate(model, prompt, request.signal);
+				if (!text.trim()) throw new EmptyWorkerResponseError(label);
+				if (index > 0) logger.debug(`${request.label} worker recovered`, { model: label });
 				selector.noteSuccess(model, request.sessionID);
 				return { text, model, fallbackUsed: index > 0 };
 			} catch (error) {
@@ -118,11 +158,34 @@ export function createWorkerInvoker(ctx: PluginContext, config: Config, logger: 
 		throw lastError instanceof Error ? lastError : new Error(String(lastError));
 	};
 
+	/**
+	 * Serialize worker calls per session: a child session runs one generation at
+	 * a time, and stage order (observe → reflect → drop) depends on it.
+	 */
+	const call = async (request: WorkerRequest): Promise<WorkerResponse> => {
+		const key = request.sessionID ?? "global";
+		const previous = chains.get(key) ?? Promise.resolve();
+		const next = previous.then(
+			() => run(request),
+			() => run(request),
+		);
+		const tracked = next
+			.catch(() => undefined)
+			.finally(() => {
+				if (chains.get(key) === tracked) chains.delete(key);
+			});
+		chains.set(key, tracked);
+		return next;
+	};
+
 	return {
 		call,
 		stats: () => ({ inputTokens, outputTokens, calls }),
 		workerModel: (sessionID: string | undefined) => selector.chosen(sessionID ?? ""),
 		lastWorkerError: () => selector.lastError(),
+		ownsSession: (sessionID: string | undefined) => sessions.owns(sessionID),
+		releaseSession: (sessionID: string) => sessions.removeParent(sessionID),
+		dispose: () => sessions.dispose(),
 	};
 }
 

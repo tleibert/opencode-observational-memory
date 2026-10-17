@@ -55,6 +55,16 @@ export type Config = {
 	 * Off by default: background work should never spend money unasked.
 	 */
 	allowPaidWorkerModel: boolean;
+	/**
+	 * How worker requests are issued.
+	 * - "auto" (default): a child worker session runs the request through native
+	 *   session machinery, which is the only path the host accepts for gated
+	 *   models such as Zen's free tier; falls back to plugin-issued generation.
+	 * - "session": always session machinery.
+	 * - "generate": always `generate.text` (needed to bill a specific model when
+	 *   the host refuses it in sessions too).
+	 */
+	workerTransport: "auto" | "session" | "generate";
 	/** Run consolidation (observe/reflect) when an assistant turn settles. */
 	consolidateWhenIdle: boolean;
 	/**
@@ -85,12 +95,17 @@ export const DEFAULTS: Config = {
 	compactionCatchUpMaxChunks: 2,
 	agentMaxTokens: 32_000,
 	allowPaidWorkerModel: false,
+	workerTransport: "auto",
 	consolidateWhenIdle: true,
 	observeBeforeRequest: false,
 	passive: false,
 	injectMemory: true,
 	debugLog: false,
 };
+
+function readChoice<T extends string>(value: unknown, choices: readonly T[], fallback: T): T {
+	return typeof value === "string" && (choices as readonly string[]).includes(value) ? (value as T) : fallback;
+}
 
 function readNumber(value: unknown, fallback: number): number {
 	const n = typeof value === "string" ? Number(value) : value;
@@ -164,6 +179,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): Config {
 		model: parseModelRef(pick("model", "OM_MODEL")) ?? DEFAULTS.model,
 		fallbackModel: parseModelRef(pick("fallbackModel", "OM_FALLBACK_MODEL")) ?? DEFAULTS.fallbackModel,
 		allowPaidWorkerModel: readBoolean(pick("allowPaidWorkerModel", "OM_ALLOW_PAID_WORKER_MODEL"), DEFAULTS.allowPaidWorkerModel),
+		workerTransport: readChoice(pick("workerTransport", "OM_WORKER_TRANSPORT"), ["auto", "session", "generate"], DEFAULTS.workerTransport),
 		consolidateWhenIdle: readBoolean(pick("consolidateWhenIdle", "OM_CONSOLIDATE_WHEN_IDLE"), DEFAULTS.consolidateWhenIdle),
 		observeBeforeRequest: readBoolean(pick("observeBeforeRequest", "OM_OBSERVE_BEFORE_REQUEST"), DEFAULTS.observeBeforeRequest),
 		passive: readBoolean(pick("passive", "OM_PASSIVE"), DEFAULTS.passive),

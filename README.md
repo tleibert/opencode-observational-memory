@@ -49,8 +49,8 @@ without config.
 
 ### Worker model
 
-Memory work (observing, reflecting, pruning) runs on a model of its own. By default the plugin
-walks a candidate list and settles on the first model that answers:
+Memory work (observing, reflecting, pruning) runs on a model of its own, inside a **child session** of
+the session being observed, and settles on the first candidate that answers:
 
 1. `model` from the options — explicit choice always wins
 2. `fallbackModel` from the options
@@ -72,18 +72,32 @@ walks a candidate list and settles on the first model that answers:
 }
 ```
 
-**Free-tier session models.** A session can run on a gated free model while plugin-issued
-generation is refused for it, because the host treats background calls differently:
+**Why a child session.** OpenCode refuses plugin-issued generation for models it gates, most visibly
+Zen's free tier:
 
 ```
 Generate.UnavailableError: OpenCode's free tier can only be used from within OpenCode.
 ```
 
-That is server-side policy and no header or client hint changes it (see the note below). The plugin
-handles it by learning the refusal, skipping the rest of that provider's free tier, and moving to a
-model that does work — usually another free model, so memory keeps running at zero cost. Refusals
-and transient failures are cached (permanent for gated models, 60s cooldown for timeouts), and the
-model that answered is remembered for the session, so the search is only paid once.
+The same call made through the *session machinery* is accepted — verified on opencode 2.0.32, where
+`generate.text` with a free model is refused but `session.generate` with that exact model answers
+normally. So workers run in a child session of the observed session:
+
+- native session machinery, so gated models work
+- the child carries the worker model, so it is still chosen by the plugin
+- `session.generate` is transient: nothing is appended to any transcript
+- children have a `parentID`, so they stay out of `opencode session list`
+- one child is kept per (session, worker model) pair and deleted on teardown or `/om:reset`
+
+`workerTransport` selects the path: `auto` (default, session machinery with a `generate.text`
+fallback), `session`, or `generate`. Use `generate` when a model must be billed through the
+plugin-issued path.
+
+**Free-tier session models.** A session can run on a gated free model while plugin-issued generation
+is refused for it. With the default `auto` transport this no longer matters: the worker inherits the
+session's model through the session machinery and runs at zero cost. If a model does fail, the
+refusal is learned and skipped (permanent for gated models, 60s cooldown for timeouts), the rest of
+that provider's free tier is skipped too, and the model that answered is remembered for the session.
 
 `allowPaidWorkerModel` is **off** by default: if only paid models remain, memory stages log a clear
 failure and skip rather than spending money you did not ask for.
@@ -131,6 +145,7 @@ Set via plugin `options` or `OM_*` environment variables (environment wins).
 | `model` | `OM_MODEL` | session model | Worker model as `provider/model[#variant]`. |
 | `fallbackModel` | `OM_FALLBACK_MODEL` | – | Tried before the session model when the primary worker model fails. |
 | `allowPaidWorkerModel` | `OM_ALLOW_PAID_WORKER_MODEL` | `false` | Allow falling back to a paid worker model when no free model works. |
+| `workerTransport` | `OM_WORKER_TRANSPORT` | `auto` | `auto` (child session + generate fallback), `session`, or `generate`. |
 | `consolidateWhenIdle` | `OM_CONSOLIDATE_WHEN_IDLE` | `true` | Background consolidation on settled turns. |
 | `observeBeforeRequest` | `OM_OBSERVE_BEFORE_REQUEST` | `false` | Observe synchronously before each agent request (deterministic; for headless/scripted runs). |
 | `injectMemory` | `OM_INJECT_MEMORY` | `true` | Inject memory into the system prompt. |

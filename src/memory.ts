@@ -431,6 +431,16 @@ export class MemoryRuntime {
 		return state.observations.length > 0 || state.reflections.length > 0;
 	}
 
+	/** True when an id belongs to a worker child session created by this plugin. */
+	ownsSession(sessionID: string | undefined): boolean {
+		return this.invoker.ownsSession?.(sessionID) ?? false;
+	}
+
+	/** Delete this session's worker children (used by om:reset). */
+	async releaseWorkerSessions(sessionID: string): Promise<void> {
+		await this.invoker.releaseSession?.(sessionID);
+	}
+
 	/** What the memory workers are actually talking to, and why they last failed. */
 	describeWorkerModel(sessionID: string): string {
 		const resolved = this.invoker.workerModel(sessionID);

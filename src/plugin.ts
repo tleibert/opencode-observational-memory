@@ -221,6 +221,7 @@ export function createPlugin() {
 					description: "Delete observational memory for this session",
 					execute: async ({ sessionID }) => {
 						await runtime.abort(sessionID);
+						await runtime.releaseWorkerSessions(sessionID);
 						await runtime.reset(sessionID);
 						await ctx.session.synthetic({ sessionID, text: "Observational memory cleared for this session." });
 					},
@@ -229,6 +230,7 @@ export function createPlugin() {
 
 			const instanceCleanup = async () => {
 				eventController.abort();
+				await invoker.dispose();
 				for (const registration of [promptRegistration, contextRegistration, compactionRegistration, toolRegistration, commandRegistration]) {
 					try {
 						await registration?.dispose?.();
