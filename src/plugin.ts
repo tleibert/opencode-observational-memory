@@ -5,6 +5,7 @@ import { createLogger, type Logger } from "./log.js";
 import { MemoryRuntime } from "./memory.js";
 import { createWorkerInvoker, describeError } from "./transport.js";
 import type { PluginContext } from "./host-types.js";
+import { PLUGIN_VERSION } from "./version.js";
 
 /**
  * OpenCode host wiring.

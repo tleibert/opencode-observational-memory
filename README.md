@@ -104,6 +104,16 @@ failure and skip rather than spending money you did not ask for.
 
 > If every candidate fails, `/om:status` shows the resolved worker model and the last failure reason.
 
+## Checking which build is running
+
+The plugin is loaded from a path or an npm package, so the version it reports is the version of the
+package it was actually loaded from:
+
+- the startup line in the debug log: `plugin loaded {"version":"0.2.0", ...}`
+- `/om:status` prints `- plugin: v0.2.0`
+
+Changes are in `CHANGELOG.md`.
+
 ## What it does
 
 | Hook | Behaviour |
@@ -146,6 +156,7 @@ Set via plugin `options` or `OM_*` environment variables (environment wins).
 | `fallbackModel` | `OM_FALLBACK_MODEL` | – | Tried before the session model when the primary worker model fails. |
 | `allowPaidWorkerModel` | `OM_ALLOW_PAID_WORKER_MODEL` | `false` | Allow falling back to a paid worker model when no free model works. |
 | `workerTransport` | `OM_WORKER_TRANSPORT` | `auto` | `auto` (child session + generate fallback), `session`, or `generate`. |
+| `notifyMemoryUpdates` | `OM_NOTIFY_MEMORY_UPDATES` | `true` | Post one line into the session when memory changed (`🧠 memory: +14 observations`). |
 | `consolidateWhenIdle` | `OM_CONSOLIDATE_WHEN_IDLE` | `true` | Background consolidation on settled turns. |
 | `observeBeforeRequest` | `OM_OBSERVE_BEFORE_REQUEST` | `false` | Observe synchronously before each agent request (deterministic; for headless/scripted runs). |
 | `injectMemory` | `OM_INJECT_MEMORY` | `true` | Inject memory into the system prompt. |

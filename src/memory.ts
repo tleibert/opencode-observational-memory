@@ -26,6 +26,7 @@ import { WorkerAbortedError } from "./transport.js";
 import type { WorkerInvoker } from "./transport.js";
 import { describeError } from "./transport.js";
 import { emptyMemoryState, isMemoryState, type MemoryState, type Observation } from "./types.js";
+import { PLUGIN_VERSION } from "./version.js";
 
 /**
  * Memory orchestration.
@@ -492,6 +493,7 @@ export class MemoryRuntime {
 			`- dropped observations: ${state.droppedObservationIds.length}`,
 			`- coverage: observed ${state.observedThrough ?? "-"}, reflected ${state.reflectedThrough ?? "-"}, dropped ${state.droppedThrough ?? "-"}`,
 			`- compactions folded into memory: ${state.compactions.length}`,
+			`- plugin: v${PLUGIN_VERSION}`,
 			`- worker runs: observer ${state.stats.observerRuns}, reflector ${state.stats.reflectorRuns}, dropper ${state.stats.dropperRuns}, failures ${state.stats.failures}`,
 			`- worker tokens this process: in ${stats.inputTokens.toLocaleString()}, out ${stats.outputTokens.toLocaleString()} (${stats.calls} calls)`,
 			`- worker model: ${this.describeWorkerModel(extra.sessionID)}`,
